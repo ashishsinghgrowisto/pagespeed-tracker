@@ -37,9 +37,10 @@ exports.handler = async (event) => {
     console.log(`[fetchScores] Processing project: ${project.name}`);
     try {
       const existing = await getExistingScores(project.sheetUrl);
-      const rows = [];
 
       for (const page of project.pages) {
+        const pageRows = [];
+
         for (const strategy of ['mobile', 'desktop']) {
           const paramName = strategy === 'mobile' ? 'Mobile Score' : 'Desktop Score';
 
@@ -57,7 +58,7 @@ exports.handler = async (event) => {
             }
 
             const difference = prevScore !== null ? score - prevScore : 0;
-            rows.push([dateStr, page.name, page.url, paramName, score, difference]);
+            pageRows.push([dateStr, page.name, page.url, paramName, score, difference]);
 
             console.log(`  ${page.name} ${paramName}: ${score} (${difference >= 0 ? '+' : ''}${difference})`);
 
@@ -67,12 +68,14 @@ exports.handler = async (event) => {
             console.error(`  Error for ${page.name} (${strategy}):`, pageErr.message);
           }
         }
-      }
 
-      if (rows.length) {
-        await appendScoresToSheet(project.sheetUrl, rows);
-        console.log(`[fetchScores] Saved ${rows.length} rows for "${project.name}"`);
+        // Write after each page — prevents total data loss if the function times out
+        if (pageRows.length) {
+          await appendScoresToSheet(project.sheetUrl, pageRows);
+          console.log(`[fetchScores] Wrote ${pageRows.length} row(s) for "${page.name}"`);
+        }
       }
+      console.log(`[fetchScores] Done with "${project.name}"`);
     } catch (projErr) {
       console.error(`[fetchScores] Error on project "${project.name}":`, projErr.message);
     }
