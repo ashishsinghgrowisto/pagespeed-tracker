@@ -52,9 +52,12 @@ export async function updateProject(id, project) {
 }
 
 export async function runScoresNow() {
-  const res = await fetch(`${BASE}/runScores`, {
+  // Background function — returns 202 immediately, processes async in background
+  const res = await fetch(`${BASE}/runScores-background`, {
     method: 'POST',
     headers: headers(),
   });
+  // 202 is success for a background function
+  if (res.status === 202) return res.json().catch(() => ({ started: true }));
   return handleResponse(res);
 }

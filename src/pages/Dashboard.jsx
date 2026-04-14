@@ -24,40 +24,15 @@ const cards = [
   },
 ];
 
-// ── tiny helpers ──────────────────────────────────────────────────────────────
-function ScoreBadge({ score }) {
-  if (score === null || score === undefined) {
-    return <span className="text-xs text-gray-400 italic">error</span>;
-  }
-  const color =
-    score >= 90 ? 'bg-green-100 text-green-700' :
-    score >= 50 ? 'bg-yellow-100 text-yellow-700' :
-                  'bg-red-100 text-red-700';
-  return (
-    <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${color}`}>
-      {score}
-    </span>
-  );
-}
-
-function DiffBadge({ diff }) {
-  if (diff === null || diff === undefined) return null;
-  const sign  = diff > 0 ? '+' : '';
-  const color = diff > 0 ? 'text-green-600' : diff < 0 ? 'text-red-500' : 'text-gray-400';
-  return <span className={`text-xs font-medium ${color}`}>{sign}{diff}</span>;
-}
-
 export default function Dashboard() {
   const user = localStorage.getItem('pst_user') || 'Admin';
 
-  const [running, setRunning]   = useState(false);
-  const [result,  setResult]    = useState(null);  // { message, date, summary } | { error }
-  const [expanded, setExpanded] = useState({});     // projectName → bool
+  const [running, setRunning] = useState(false);
+  const [result,  setResult]  = useState(null);  // { started, message, projects } | { error }
 
   const handleRunNow = async () => {
     setRunning(true);
     setResult(null);
-    setExpanded({});
     try {
       const data = await runScoresNow();
       setResult(data);
@@ -67,9 +42,6 @@ export default function Dashboard() {
       setRunning(false);
     }
   };
-
-  const toggleProject = (name) =>
-    setExpanded(prev => ({ ...prev, [name]: !prev[name] }));
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -159,8 +131,8 @@ export default function Dashboard() {
           {running && (
             <div className="px-6 py-8 flex flex-col items-center gap-3 text-center">
               <div className="w-10 h-10 rounded-full border-4 border-indigo-200 border-t-indigo-600 animate-spin" />
-              <p className="text-gray-600 font-medium">Fetching scores from PageSpeed Insights…</p>
-              <p className="text-gray-400 text-sm">This may take a minute depending on the number of pages. Please keep this tab open.</p>
+              <p className="text-gray-600 font-medium">Starting score run…</p>
+              <p className="text-gray-400 text-sm">Sending request to the server, hang tight.</p>
             </div>
           )}
 
@@ -175,90 +147,21 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* Success state */}
-          {!running && result && !result.error && (
-            <div className="divide-y divide-gray-100">
-              {/* Summary bar */}
-              <div className="px-6 py-4 bg-green-50 flex items-center gap-3">
-                <span className="text-xl">✅</span>
+          {/* Started (202) state */}
+          {!running && result?.started && (
+            <div className="px-6 py-5 bg-green-50 border-t border-green-100">
+              <div className="flex items-start gap-3">
+                <span className="text-2xl">🚀</span>
                 <div>
-                  <p className="font-semibold text-green-800">{result.message}</p>
+                  <p className="font-semibold text-green-800">Score run started!</p>
                   <p className="text-green-700 text-sm mt-0.5">
-                    Scores have been appended to each project's Google Sheet.
+                    {result.message || `Fetching scores for ${result.projects} project(s) in the background.`}
+                  </p>
+                  <p className="text-green-600 text-xs mt-2">
+                    PageSpeed Insights scores take ~2 seconds per page. Open your Google Sheet in a few minutes to see the new rows.
                   </p>
                 </div>
               </div>
-
-              {/* Per-project breakdown */}
-              {result.summary?.length > 0 && (
-                <div className="divide-y divide-gray-100">
-                  {result.summary.map((proj) => (
-                    <div key={proj.project} className="px-6">
-                      {/* Project row — clickable to expand */}
-                      <button
-                        className="w-full flex items-center justify-between py-4 text-left"
-                        onClick={() => toggleProject(proj.project)}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium text-gray-900">{proj.project}</span>
-                          {proj.error && (
-                            <span className="text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded-full">error</span>
-                          )}
-                          {!proj.error && (
-                            <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
-                              {proj.pages.filter(p => p.score !== null).length}/{proj.pages.length} ok
-                            </span>
-                          )}
-                        </div>
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          className={`h-4 w-4 text-gray-400 transition-transform ${expanded[proj.project] ? 'rotate-180' : ''}`}
-                          viewBox="0 0 20 20" fill="currentColor"
-                        >
-                          <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
-                        </svg>
-                      </button>
-
-                      {/* Expanded page rows */}
-                      {expanded[proj.project] && (
-                        <div className="pb-4">
-                          {proj.error ? (
-                            <p className="text-sm text-red-500 bg-red-50 rounded-lg px-3 py-2">{proj.error}</p>
-                          ) : (
-                            <table className="w-full text-sm">
-                              <thead>
-                                <tr className="text-xs text-gray-400 uppercase tracking-wide">
-                                  <th className="text-left pb-2 font-medium">Page</th>
-                                  <th className="text-left pb-2 font-medium">Type</th>
-                                  <th className="text-center pb-2 font-medium">Score</th>
-                                  <th className="text-center pb-2 font-medium">vs. Previous</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-gray-50">
-                                {proj.pages.map((p, i) => (
-                                  <tr key={i} className="hover:bg-gray-50">
-                                    <td className="py-2 pr-3 text-gray-700 max-w-[160px] truncate">{p.page}</td>
-                                    <td className="py-2 pr-3 text-gray-500">{p.strategy}</td>
-                                    <td className="py-2 pr-3 text-center">
-                                      {p.error
-                                        ? <span className="text-xs text-red-400">{p.error}</span>
-                                        : <ScoreBadge score={p.score} />
-                                      }
-                                    </td>
-                                    <td className="py-2 text-center">
-                                      {!p.error && <DiffBadge diff={p.difference} />}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           )}
 

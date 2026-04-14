@@ -19,9 +19,9 @@ exports.handler = async (event) => {
     };
   }
 
-  // Require valid JWT
-  const authError = verifyToken(event);
-  if (authError) {
+  // Require valid JWT (verifyToken returns decoded payload on success, null on failure)
+  const user = verifyToken(event);
+  if (!user) {
     return {
       statusCode: 401,
       body: JSON.stringify({ error: 'Unauthorized' }),
