@@ -1,86 +1,100 @@
 /**
  * Scheduled Netlify Function — runs daily at 02:00 UTC.
- * Schedule is declared in netlify.toml: [functions."fetchScores"] schedule = "0 2 * * *"
+ * Schedule declared in netlify.toml: [functions."fetchScores"] schedule = "0 2 * * *"
  *
- * For each project it:
- *  1. Fetches PSI scores (mobile + desktop) for every page URL
- *  2. Calculates the difference vs the previous day's score
- *  3. Appends a row per page × strategy to the project's Google Sheet
+ * Runs ALL PSI calls in parallel (Promise.allSettled) so total runtime is
+ * bounded by the slowest single call (~60-90s) not by N × calls × 60s.
  */
 
 const { getProjects } = require('./_utils/storage');
 const { getExistingScores, appendScoresToSheet } = require('./_utils/googleSheets');
-const { fetchPageSpeed, sleep } = require('./_utils/psi');
+const { fetchPageSpeed } = require('./_utils/psi');
+
+async function processProject(project, dateStr) {
+  console.log(`[fetchScores] → ${project.name} (${project.pages.length} pages)`);
+
+  let existing = [];
+  try {
+    existing = await getExistingScores(project.sheetUrl);
+  } catch (e) {
+    console.warn(`  Could not read existing scores: ${e.message}`);
+  }
+
+  const tasks = [];
+  for (const page of project.pages) {
+    for (const strategy of ['mobile', 'desktop']) {
+      tasks.push({ page, strategy });
+    }
+  }
+
+  console.log(`  Firing ${tasks.length} PSI calls in parallel…`);
+  const startMs = Date.now();
+
+  const settled = await Promise.allSettled(
+    tasks.map(({ page, strategy }) => fetchPageSpeed(page.url, strategy))
+  );
+
+  console.log(`  Done in ${((Date.now() - startMs) / 1000).toFixed(1)}s`);
+
+  const rows = [];
+  settled.forEach((result, i) => {
+    const { page, strategy } = tasks[i];
+    const paramName = strategy === 'mobile' ? 'Mobile Score' : 'Desktop Score';
+
+    if (result.status === 'fulfilled') {
+      const score = result.value;
+      let prevScore = null;
+      for (let j = existing.length - 1; j >= 1; j--) {
+        const r = existing[j];
+        if (r[1] === page.name && r[3] === paramName && r[4] !== undefined) {
+          const parsed = parseFloat(r[4]);
+          if (!isNaN(parsed)) { prevScore = parsed; break; }
+        }
+      }
+      const difference = prevScore !== null ? score - prevScore : 0;
+      rows.push([dateStr, page.name, page.url, paramName, score, difference]);
+      console.log(`  ✓ ${page.name} | ${paramName}: ${score} (${difference >= 0 ? '+' : ''}${difference})`);
+    } else {
+      console.error(`  ✗ ${page.name} (${strategy}): ${result.reason?.message}`);
+    }
+  });
+
+  if (rows.length) {
+    await appendScoresToSheet(project.sheetUrl, rows);
+    console.log(`  → Wrote ${rows.length} rows for "${project.name}"`);
+  }
+}
 
 exports.handler = async (event) => {
-  console.log('[fetchScores] Starting daily PageSpeed score collection…');
+  console.log('[fetchScores] Daily run started');
 
   let projects;
   try {
     projects = await getProjects();
   } catch (err) {
-    console.error('[fetchScores] Failed to read master sheet:', err.message);
+    console.error('[fetchScores] Failed to read projects:', err.message);
     return { statusCode: 500, body: err.message };
   }
 
   if (!projects.length) {
-    console.log('[fetchScores] No projects found — nothing to do.');
+    console.log('[fetchScores] No projects — nothing to do.');
     return { statusCode: 200, body: 'No projects' };
   }
 
   const today = new Date();
   const dateStr = today
     .toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
-    .replace(/ /g, '-'); // e.g. "14-Apr-2026"
+    .replace(/ /g, '-');
 
-  for (const project of projects) {
-    console.log(`[fetchScores] Processing project: ${project.name}`);
-    try {
-      const existing = await getExistingScores(project.sheetUrl);
+  const totalTasks = projects.reduce((s, p) => s + p.pages.length * 2, 0);
+  console.log(`[fetchScores] ${projects.length} project(s), ${totalTasks} PSI calls — all parallel`);
 
-      for (const page of project.pages) {
-        const pageRows = [];
+  const overallStart = Date.now();
 
-        for (const strategy of ['mobile', 'desktop']) {
-          const paramName = strategy === 'mobile' ? 'Mobile Score' : 'Desktop Score';
+  await Promise.allSettled(
+    projects.map(project => processProject(project, dateStr))
+  );
 
-          try {
-            const score = await fetchPageSpeed(page.url, strategy);
-
-            // Find the most recent previous score for this page + strategy
-            let prevScore = null;
-            for (let i = existing.length - 1; i >= 1; i--) {
-              const r = existing[i];
-              if (r[1] === page.name && r[3] === paramName && r[4] !== undefined) {
-                const parsed = parseFloat(r[4]);
-                if (!isNaN(parsed)) { prevScore = parsed; break; }
-              }
-            }
-
-            const difference = prevScore !== null ? score - prevScore : 0;
-            pageRows.push([dateStr, page.name, page.url, paramName, score, difference]);
-
-            console.log(`  ${page.name} ${paramName}: ${score} (${difference >= 0 ? '+' : ''}${difference})`);
-
-            // Respect PSI rate limit: ~1 req/sec is safe
-            await sleep(1200);
-          } catch (pageErr) {
-            console.error(`  Error for ${page.name} (${strategy}):`, pageErr.message);
-          }
-        }
-
-        // Write after each page — prevents total data loss if the function times out
-        if (pageRows.length) {
-          await appendScoresToSheet(project.sheetUrl, pageRows);
-          console.log(`[fetchScores] Wrote ${pageRows.length} row(s) for "${page.name}"`);
-        }
-      }
-      console.log(`[fetchScores] Done with "${project.name}"`);
-    } catch (projErr) {
-      console.error(`[fetchScores] Error on project "${project.name}":`, projErr.message);
-    }
-  }
-
-  console.log('[fetchScores] Done.');
+  console.log(`[fetchScores] Done in ${((Date.now() - overallStart) / 1000).toFixed(1)}s`);
   return { statusCode: 200, body: 'OK' };
 };

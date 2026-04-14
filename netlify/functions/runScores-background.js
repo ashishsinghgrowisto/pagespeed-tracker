@@ -1,10 +1,12 @@
 /**
  * Background Function — POST /.netlify/functions/runScores-background
  *
- * How Netlify Background Functions work:
- *  - The client gets a 202 immediately (Netlify intercepts it).
- *  - The handler keeps running until it RETURNS — up to 15 minutes.
- *  - So we MUST await all the work inside the handler (not fire-and-forget).
+ * Runs all PSI calls for all projects IN PARALLEL using Promise.allSettled().
+ * For N pages × 2 strategies across P projects, total time ≈ slowest single
+ * PSI call (~60-90s) instead of N×P×60s sequential.
+ *
+ * Netlify Background Functions return 202 to the client immediately and keep
+ * the handler alive (up to 15 min) until it returns.
  *
  * Requires a valid JWT in the Authorization header.
  */
@@ -12,21 +14,86 @@
 const { verifyToken } = require('./_utils/auth');
 const { getProjects } = require('./_utils/storage');
 const { getExistingScores, appendScoresToSheet } = require('./_utils/googleSheets');
-const { fetchPageSpeed, sleep } = require('./_utils/psi');
+const { fetchPageSpeed } = require('./_utils/psi');
 
+// ── Core parallel runner ──────────────────────────────────────────────────────
+async function processProject(project, dateStr) {
+  console.log(`[runScores-bg] → ${project.name} (${project.pages.length} pages)`);
+
+  // Read existing scores once per project (for diff calculation)
+  let existing = [];
+  try {
+    existing = await getExistingScores(project.sheetUrl);
+  } catch (e) {
+    console.warn(`  Could not read existing scores: ${e.message}`);
+  }
+
+  // Build every (page × strategy) task
+  const tasks = [];
+  for (const page of project.pages) {
+    for (const strategy of ['mobile', 'desktop']) {
+      tasks.push({ page, strategy });
+    }
+  }
+
+  console.log(`  Firing ${tasks.length} PSI calls in parallel…`);
+  const startMs = Date.now();
+
+  // Run ALL calls concurrently
+  const settled = await Promise.allSettled(
+    tasks.map(({ page, strategy }) => fetchPageSpeed(page.url, strategy))
+  );
+
+  const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
+  console.log(`  All PSI calls finished in ${elapsed}s`);
+
+  // Build rows from results
+  const rows = [];
+  settled.forEach((result, i) => {
+    const { page, strategy } = tasks[i];
+    const paramName = strategy === 'mobile' ? 'Mobile Score' : 'Desktop Score';
+
+    if (result.status === 'fulfilled') {
+      const score = result.value;
+
+      // Find previous score for diff
+      let prevScore = null;
+      for (let j = existing.length - 1; j >= 1; j--) {
+        const r = existing[j];
+        if (r[1] === page.name && r[3] === paramName && r[4] !== undefined) {
+          const parsed = parseFloat(r[4]);
+          if (!isNaN(parsed)) { prevScore = parsed; break; }
+        }
+      }
+
+      const difference = prevScore !== null ? score - prevScore : 0;
+      rows.push([dateStr, page.name, page.url, paramName, score, difference]);
+      console.log(`  ✓ ${page.name} | ${paramName}: ${score} (${difference >= 0 ? '+' : ''}${difference})`);
+    } else {
+      console.error(`  ✗ ${page.name} (${strategy}): ${result.reason?.message}`);
+    }
+  });
+
+  if (rows.length) {
+    await appendScoresToSheet(project.sheetUrl, rows);
+    console.log(`  → Wrote ${rows.length} rows for "${project.name}"`);
+  }
+
+  return { project: project.name, rows: rows.length, elapsed };
+}
+
+// ── Handler ───────────────────────────────────────────────────────────────────
 exports.handler = async (event) => {
-  // Only allow POST
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method not allowed' };
   }
 
-  // Auth check happens before the 202 is sent — client gets 401 if invalid
   const user = verifyToken(event);
   if (!user) {
     return { statusCode: 401, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
-  console.log('[runScores-bg] Background run started');
+  console.log('[runScores-bg] Manual run started');
 
   let projects;
   try {
@@ -46,60 +113,28 @@ exports.handler = async (event) => {
     .toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
     .replace(/ /g, '-');
 
-  console.log(`[runScores-bg] Processing ${projects.length} project(s) for ${dateStr}`);
+  const totalTasks = projects.reduce((s, p) => s + p.pages.length * 2, 0);
+  console.log(`[runScores-bg] ${projects.length} project(s), ${totalTasks} total PSI calls — running all in parallel`);
 
-  // IMPORTANT: await everything — the handler must not return until all work is done.
-  // Netlify keeps the function alive and has already sent 202 to the client.
-  for (const project of projects) {
-    console.log(`[runScores-bg] → Project: ${project.name}`);
-    try {
-      const existing = await getExistingScores(project.sheetUrl);
+  const overallStart = Date.now();
 
-      for (const page of project.pages) {
-        const pageRows = [];
+  // Process ALL projects in parallel too
+  const projectResults = await Promise.allSettled(
+    projects.map(project => processProject(project, dateStr))
+  );
 
-        for (const strategy of ['mobile', 'desktop']) {
-          const paramName = strategy === 'mobile' ? 'Mobile Score' : 'Desktop Score';
-          try {
-            console.log(`  Fetching ${paramName} for ${page.name}…`);
-            const score = await fetchPageSpeed(page.url, strategy);
+  const totalElapsed = ((Date.now() - overallStart) / 1000).toFixed(1);
 
-            // Find previous score for this page + strategy
-            let prevScore = null;
-            for (let i = existing.length - 1; i >= 1; i--) {
-              const r = existing[i];
-              if (r[1] === page.name && r[3] === paramName && r[4] !== undefined) {
-                const parsed = parseFloat(r[4]);
-                if (!isNaN(parsed)) { prevScore = parsed; break; }
-              }
-            }
-
-            const difference = prevScore !== null ? score - prevScore : 0;
-            pageRows.push([dateStr, page.name, page.url, paramName, score, difference]);
-            console.log(`  ✓ ${page.name} ${paramName}: ${score} (${difference >= 0 ? '+' : ''}${difference})`);
-            await sleep(1200);
-          } catch (pageErr) {
-            console.error(`  ✗ ${page.name} (${strategy}): ${pageErr.message}`);
-          }
-        }
-
-        // Write after each page — so a timeout can't wipe all results
-        if (pageRows.length) {
-          await appendScoresToSheet(project.sheetUrl, pageRows);
-          console.log(`  → Wrote ${pageRows.length} row(s) for "${page.name}" to sheet`);
-        }
-      }
-      console.log(`[runScores-bg] ✓ All pages saved for "${project.name}"`);
-    } catch (projErr) {
-      console.error(`[runScores-bg] Error on "${project.name}": ${projErr.message}`);
+  projectResults.forEach((r, i) => {
+    if (r.status === 'rejected') {
+      console.error(`[runScores-bg] Project "${projects[i].name}" failed: ${r.reason?.message}`);
     }
-  }
+  });
 
-  console.log('[runScores-bg] All done.');
+  console.log(`[runScores-bg] All done in ${totalElapsed}s total.`);
 
-  // Return value is largely ignored (202 was already sent), but we return 202 anyway.
   return {
     statusCode: 202,
-    body: JSON.stringify({ done: true, projects: projects.length }),
+    body: JSON.stringify({ done: true, projects: projects.length, totalElapsed }),
   };
 };
