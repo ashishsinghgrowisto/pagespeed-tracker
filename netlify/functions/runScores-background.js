@@ -1,26 +1,27 @@
 /**
  * Background Function — POST /.netlify/functions/runScores-background
  *
- * Runs all PSI calls for all projects IN PARALLEL using Promise.allSettled().
- * For N pages × 2 strategies across P projects, total time ≈ slowest single
- * PSI call (~60-90s) instead of N×P×60s sequential.
- *
- * Netlify Background Functions return 202 to the client immediately and keep
- * the handler alive (up to 15 min) until it returns.
- *
- * Requires a valid JWT in the Authorization header.
+ * Guards:
+ *  - Requires valid JWT.
+ *  - Returns 409 if a cron or another manual run is already in progress.
+ *  - Skips any project that already has rows for today's date.
+ * Runs all PSI calls in parallel via Promise.allSettled.
  */
 
 const { verifyToken } = require('./_utils/auth');
-const { getProjects } = require('./_utils/storage');
+const { getProjects, acquireLock, releaseLock } = require('./_utils/storage');
 const { getExistingScores, appendScoresToSheet } = require('./_utils/googleSheets');
 const { fetchPageSpeed } = require('./_utils/psi');
 
-// ── Core parallel runner ──────────────────────────────────────────────────────
-async function processProject(project, dateStr) {
-  console.log(`[runScores-bg] → ${project.name} (${project.pages.length} pages)`);
+function todayDateStr() {
+  return new Date()
+    .toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+    .replace(/ /g, '-');
+}
 
-  // Read existing scores once per project (for diff calculation)
+async function processProject(project, dateStr) {
+  console.log(`[runScores-bg] → ${project.name}`);
+
   let existing = [];
   try {
     existing = await getExistingScores(project.sheetUrl);
@@ -28,7 +29,14 @@ async function processProject(project, dateStr) {
     console.warn(`  Could not read existing scores: ${e.message}`);
   }
 
-  // Build every (page × strategy) task
+  // ── Date-skip guard ───────────────────────────────────────────────────────
+  const alreadyDone = existing.slice(1).some(r => r[0] === dateStr);
+  if (alreadyDone) {
+    console.log(`  ↩ Already has data for ${dateStr} — skipping`);
+    return { project: project.name, skipped: true };
+  }
+
+  // ── Parallel PSI calls ────────────────────────────────────────────────────
   const tasks = [];
   for (const page of project.pages) {
     for (const strategy of ['mobile', 'desktop']) {
@@ -37,17 +45,14 @@ async function processProject(project, dateStr) {
   }
 
   console.log(`  Firing ${tasks.length} PSI calls in parallel…`);
-  const startMs = Date.now();
+  const t0 = Date.now();
 
-  // Run ALL calls concurrently
   const settled = await Promise.allSettled(
     tasks.map(({ page, strategy }) => fetchPageSpeed(page.url, strategy))
   );
 
-  const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
-  console.log(`  All PSI calls finished in ${elapsed}s`);
+  console.log(`  Done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
-  // Build rows from results
   const rows = [];
   settled.forEach((result, i) => {
     const { page, strategy } = tasks[i];
@@ -55,20 +60,17 @@ async function processProject(project, dateStr) {
 
     if (result.status === 'fulfilled') {
       const score = result.value;
-
-      // Find previous score for diff
       let prevScore = null;
       for (let j = existing.length - 1; j >= 1; j--) {
         const r = existing[j];
         if (r[1] === page.name && r[3] === paramName && r[4] !== undefined) {
-          const parsed = parseFloat(r[4]);
-          if (!isNaN(parsed)) { prevScore = parsed; break; }
+          const p = parseFloat(r[4]);
+          if (!isNaN(p)) { prevScore = p; break; }
         }
       }
-
-      const difference = prevScore !== null ? score - prevScore : 0;
-      rows.push([dateStr, page.name, page.url, paramName, score, difference]);
-      console.log(`  ✓ ${page.name} | ${paramName}: ${score} (${difference >= 0 ? '+' : ''}${difference})`);
+      const diff = prevScore !== null ? score - prevScore : 0;
+      rows.push([dateStr, page.name, page.url, paramName, score, diff]);
+      console.log(`  ✓ ${page.name} | ${paramName}: ${score} (${diff >= 0 ? '+' : ''}${diff})`);
     } else {
       console.error(`  ✗ ${page.name} (${strategy}): ${result.reason?.message}`);
     }
@@ -79,10 +81,9 @@ async function processProject(project, dateStr) {
     console.log(`  → Wrote ${rows.length} rows for "${project.name}"`);
   }
 
-  return { project: project.name, rows: rows.length, elapsed };
+  return { project: project.name, skipped: false, rows: rows.length };
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method not allowed' };
@@ -93,48 +94,46 @@ exports.handler = async (event) => {
     return { statusCode: 401, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
-  console.log('[runScores-bg] Manual run started');
+  // ── Lock check ────────────────────────────────────────────────────────────
+  const acquired = await acquireLock('manual');
+  if (!acquired) {
+    return {
+      statusCode: 409,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        error: 'A score run is already in progress (cron or another manual trigger). Please wait for it to finish.',
+      }),
+    };
+  }
 
-  let projects;
+  const dateStr = todayDateStr();
+  console.log(`[runScores-bg] Manual run started — date: ${dateStr}`);
+
   try {
-    projects = await getProjects();
-  } catch (err) {
-    console.error('[runScores-bg] Failed to load projects:', err.message);
-    return { statusCode: 202, body: JSON.stringify({ started: true }) };
-  }
+    const projects = await getProjects();
 
-  if (!projects.length) {
-    console.log('[runScores-bg] No projects — nothing to do.');
-    return { statusCode: 202, body: JSON.stringify({ started: true }) };
-  }
-
-  const today = new Date();
-  const dateStr = today
-    .toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
-    .replace(/ /g, '-');
-
-  const totalTasks = projects.reduce((s, p) => s + p.pages.length * 2, 0);
-  console.log(`[runScores-bg] ${projects.length} project(s), ${totalTasks} total PSI calls — running all in parallel`);
-
-  const overallStart = Date.now();
-
-  // Process ALL projects in parallel too
-  const projectResults = await Promise.allSettled(
-    projects.map(project => processProject(project, dateStr))
-  );
-
-  const totalElapsed = ((Date.now() - overallStart) / 1000).toFixed(1);
-
-  projectResults.forEach((r, i) => {
-    if (r.status === 'rejected') {
-      console.error(`[runScores-bg] Project "${projects[i].name}" failed: ${r.reason?.message}`);
+    if (!projects.length) {
+      return { statusCode: 202, body: JSON.stringify({ started: true, message: 'No projects found.' }) };
     }
-  });
 
-  console.log(`[runScores-bg] All done in ${totalElapsed}s total.`);
+    const totalCalls = projects.reduce((s, p) => s + p.pages.length * 2, 0);
+    console.log(`[runScores-bg] ${projects.length} project(s), up to ${totalCalls} PSI calls — all parallel`);
 
-  return {
-    statusCode: 202,
-    body: JSON.stringify({ done: true, projects: projects.length, totalElapsed }),
-  };
+    const t0 = Date.now();
+    await Promise.allSettled(projects.map(p => processProject(p, dateStr)));
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    console.log(`[runScores-bg] All done in ${elapsed}s`);
+
+    return {
+      statusCode: 202,
+      body: JSON.stringify({
+        started: true,
+        projects: projects.length,
+        message: `Score run complete for ${projects.length} project(s). Check your Google Sheets for updated data.`,
+      }),
+    };
+  } finally {
+    await releaseLock();
+    console.log('[runScores-bg] Lock released.');
+  }
 };

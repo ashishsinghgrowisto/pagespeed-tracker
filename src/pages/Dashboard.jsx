@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import Navbar from '../components/Navbar';
-import { runScoresNow } from '../utils/api';
+import { runScoresNow, getRunStatus } from '../utils/api';
 
 const cards = [
   {
@@ -27,8 +27,38 @@ const cards = [
 export default function Dashboard() {
   const user = localStorage.getItem('pst_user') || 'Admin';
 
-  const [running, setRunning] = useState(false);
-  const [result,  setResult]  = useState(null);  // { started, message, projects } | { error }
+  const [running,    setRunning]    = useState(false);
+  const [result,     setResult]     = useState(null);
+  const [lockStatus, setLockStatus] = useState(null); // { running, lock } from server
+
+  // Poll lock status on mount and every 15s so UI stays in sync with cron
+  useEffect(() => {
+    let cancelled = false;
+
+    async function checkStatus() {
+      try {
+        const status = await getRunStatus();
+        if (!cancelled) setLockStatus(status);
+      } catch {
+        // ignore polling errors
+      }
+    }
+
+    checkStatus();
+    const interval = setInterval(checkStatus, 15000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  const isLocked = lockStatus?.running || running;
+
+  const lockLabel = () => {
+    if (running) return 'Starting…';
+    if (lockStatus?.running) {
+      const who = lockStatus.lock?.type === 'cron' ? 'Nightly cron' : 'Manual trigger';
+      return `${who} in progress…`;
+    }
+    return null;
+  };
 
   const handleRunNow = async () => {
     setRunning(true);
@@ -40,6 +70,8 @@ export default function Dashboard() {
       setResult({ error: err.message });
     } finally {
       setRunning(false);
+      // Re-check lock status after run
+      try { const s = await getRunStatus(); setLockStatus(s); } catch {}
     }
   };
 
@@ -100,21 +132,20 @@ export default function Dashboard() {
 
             <button
               onClick={handleRunNow}
-              disabled={running}
+              disabled={isLocked}
               className={`shrink-0 inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white transition-all shadow-sm
-                ${running
-                  ? 'bg-indigo-400 cursor-not-allowed'
+                ${isLocked
+                  ? 'bg-indigo-300 cursor-not-allowed'
                   : 'bg-indigo-600 hover:bg-indigo-700 active:scale-95'
                 }`}
             >
-              {running ? (
+              {isLocked ? (
                 <>
-                  {/* Spinner */}
                   <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
                   </svg>
-                  Fetching scores…
+                  {lockLabel()}
                 </>
               ) : (
                 <>
@@ -127,12 +158,18 @@ export default function Dashboard() {
             </button>
           </div>
 
-          {/* Loading state */}
-          {running && (
-            <div className="px-6 py-8 flex flex-col items-center gap-3 text-center">
-              <div className="w-10 h-10 rounded-full border-4 border-indigo-200 border-t-indigo-600 animate-spin" />
-              <p className="text-gray-600 font-medium">Starting score run…</p>
-              <p className="text-gray-400 text-sm">Sending request to the server, hang tight.</p>
+          {/* Lock banner — shown when server says a run is active */}
+          {lockStatus?.running && !running && (
+            <div className="px-6 py-4 bg-amber-50 border-b border-amber-100 flex items-start gap-3">
+              <span className="text-xl">🔒</span>
+              <div>
+                <p className="font-semibold text-amber-800">
+                  {lockStatus.lock?.type === 'cron' ? 'Nightly cron' : 'A manual run'} is currently in progress
+                </p>
+                <p className="text-amber-700 text-sm mt-0.5">
+                  Started at {new Date(lockStatus.lock?.startedAt).toLocaleTimeString()} — manual trigger is disabled until it finishes.
+                </p>
+              </div>
             </div>
           )}
 
@@ -147,26 +184,26 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* Started (202) state */}
+          {/* Started state */}
           {!running && result?.started && (
             <div className="px-6 py-5 bg-green-50 border-t border-green-100">
               <div className="flex items-start gap-3">
                 <span className="text-2xl">🚀</span>
                 <div>
-                  <p className="font-semibold text-green-800">Score run started!</p>
+                  <p className="font-semibold text-green-800">Score run complete!</p>
                   <p className="text-green-700 text-sm mt-0.5">
-                    {result.message || `Fetching scores for ${result.projects} project(s) in the background.`}
+                    {result.message}
                   </p>
                   <p className="text-green-600 text-xs mt-2">
-                    PageSpeed Insights scores take ~2 seconds per page. Open your Google Sheet in a few minutes to see the new rows.
+                    Projects that already had scores for today were automatically skipped.
                   </p>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Empty / idle state — show hint */}
-          {!running && !result && (
+          {/* Idle hint */}
+          {!running && !result && !lockStatus?.running && (
             <div className="px-6 py-5 text-gray-400 text-sm">
               Click <span className="font-medium text-gray-600">Run Now</span> to immediately fetch and store PageSpeed scores for all your projects.
             </div>
@@ -179,8 +216,8 @@ export default function Dashboard() {
           <div>
             <p className="font-semibold text-indigo-900">Automated daily collection</p>
             <p className="text-indigo-700 text-sm mt-0.5">
-              PageSpeed scores for all project pages are automatically fetched every day at 02:00 UTC
-              and appended to each project's Google Sheet.
+              PageSpeed scores are automatically fetched every day at <strong>12:00 AM IST</strong> and
+              appended to each project's Google Sheet. Projects already scored that day are skipped automatically.
             </p>
           </div>
         </div>

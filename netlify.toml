@@ -7,7 +7,7 @@
   node_bundler = "nft"
 
 [functions."fetchScores"]
-  schedule = "0 2 * * *"
+  schedule = "30 18 * * *"   # 12:00 AM IST (UTC+5:30)
 
 [functions."runScores"]
   timeout = 26

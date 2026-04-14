@@ -14,6 +14,11 @@ async function handleResponse(res) {
   return data;
 }
 
+export async function getRunStatus() {
+  const res = await fetch(`${BASE}/runStatus`, { headers: headers() });
+  return handleResponse(res);
+}
+
 export async function login(username, password) {
   const res = await fetch(`${BASE}/login`, {
     method: 'POST',
@@ -52,12 +57,11 @@ export async function updateProject(id, project) {
 }
 
 export async function runScoresNow() {
-  // Background function — returns 202 immediately, processes async in background
   const res = await fetch(`${BASE}/runScores-background`, {
     method: 'POST',
     headers: headers(),
   });
-  // 202 is success for a background function
+  // 202 = background started, 409 = already running — both handled as JSON
   if (res.status === 202) return res.json().catch(() => ({ started: true }));
-  return handleResponse(res);
+  return handleResponse(res); // throws for 401, 409, etc.
 }
