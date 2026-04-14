@@ -50,3 +50,11 @@ export async function updateProject(id, project) {
   });
   return handleResponse(res);
 }
+
+export async function runScoresNow() {
+  const res = await fetch(`${BASE}/runScores`, {
+    method: 'POST',
+    headers: headers(),
+  });
+  return handleResponse(res);
+}
