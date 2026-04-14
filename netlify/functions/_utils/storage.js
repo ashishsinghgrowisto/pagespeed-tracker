@@ -4,14 +4,17 @@
  * Keys in the "pagespeed-tracker" store:
  *   "projects"  — JSON array of all project configs
  *   "run-lock"  — JSON lock object while a cron/manual run is in progress
+ *
+ * NOTE: We avoid store.delete() because it can silently fail when using a PAT
+ * token. Instead we store null / the lock object with store.set().
  */
 const { getStore } = require('@netlify/blobs');
 
-const STORE_NAME  = 'pagespeed-tracker';
+const STORE_NAME   = 'pagespeed-tracker';
 const PROJECTS_KEY = 'projects';
-const LOCK_KEY    = 'run-lock';
+const LOCK_KEY     = 'run-lock';
 
-// Lock expires after 20 min (safety valve so a crashed run never permanently blocks)
+// Lock expires after 20 min (safety valve so a crashed run never blocks forever)
 const LOCK_TTL_MS = 20 * 60 * 1000;
 
 function getProjectStore() {
@@ -62,17 +65,18 @@ async function updateProject(id, project) {
 // ── Run Lock ──────────────────────────────────────────────────────────────────
 /**
  * Returns the current lock object, or null if not locked / lock is stale.
- * { type: 'cron'|'manual', startedAt: ISO string }
  */
 async function getLock() {
   const store = getProjectStore();
   try {
     const raw = await store.get(LOCK_KEY);
-    if (!raw) return null;
+    if (!raw || raw === 'null') return null;
     const lock = JSON.parse(raw);
-    // Auto-expire stale locks so a crash can't block runs forever
+    if (!lock || !lock.type) return null;
+    // Auto-expire stale locks
     if (Date.now() - new Date(lock.startedAt).getTime() > LOCK_TTL_MS) {
-      await store.delete(LOCK_KEY).catch(() => {});
+      // Release stale lock
+      await store.set(LOCK_KEY, 'null').catch(() => {});
       return null;
     }
     return lock;
@@ -83,11 +87,10 @@ async function getLock() {
 
 /**
  * Acquires the lock. Returns true on success, false if already locked.
- * @param {'cron'|'manual'} type
  */
 async function acquireLock(type) {
   const existing = await getLock();
-  if (existing) return false; // already locked
+  if (existing) return false;
   const store = getProjectStore();
   await store.set(LOCK_KEY, JSON.stringify({
     type,
@@ -96,10 +99,16 @@ async function acquireLock(type) {
   return true;
 }
 
-/** Releases the lock unconditionally. */
+/**
+ * Releases the lock by setting it to null (avoids store.delete() reliability issues).
+ */
 async function releaseLock() {
   const store = getProjectStore();
-  await store.delete(LOCK_KEY).catch(() => {});
+  try {
+    await store.set(LOCK_KEY, 'null');
+  } catch (e) {
+    console.error('[lock] Failed to release lock:', e.message);
+  }
 }
 
 module.exports = {

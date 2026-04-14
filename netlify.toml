@@ -6,7 +6,7 @@
 [functions]
   node_bundler = "nft"
 
-[functions."fetchScores"]
+[functions."fetchScores-background"]
   schedule = "30 18 * * *"   # 12:00 AM IST (UTC+5:30)
 
 [functions."runScores"]
