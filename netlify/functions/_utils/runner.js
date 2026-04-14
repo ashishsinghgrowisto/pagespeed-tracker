@@ -127,14 +127,25 @@ async function runAllProjects(context = 'manual') {
   console.log(`${tag} All PSI calls done in ${elapsed}s`);
 
   // ── Group rows by project and write to sheets ────────────────────────────
+  // results[i] maps 1-to-1 with allTasks[i], so we always know which page failed.
   const rowsByProject = new Map();
-  results.forEach((result) => {
+
+  results.forEach((result, i) => {
+    const { project, page, strategy } = allTasks[i];
+    const paramName = strategy === 'mobile' ? 'Mobile Score' : 'Desktop Score';
+
+    if (!rowsByProject.has(project.id)) {
+      rowsByProject.set(project.id, { project, rows: [] });
+    }
+
     if (result.status === 'fulfilled') {
-      const { project, row } = result.value;
-      if (!rowsByProject.has(project.id)) rowsByProject.set(project.id, { project, rows: [] });
-      rowsByProject.get(project.id).rows.push(row);
+      rowsByProject.get(project.id).rows.push(result.value.row);
     } else {
-      console.error(`${tag} PSI call failed: ${result.reason?.message}`);
+      // All 3 retries exhausted — write FAILED so it's visible in the sheet
+      console.error(`${tag} ✗ [${project.name}] ${page.name} | ${paramName}: FAILED — ${result.reason?.message}`);
+      rowsByProject.get(project.id).rows.push(
+        [dateStr, page.name, page.url, paramName, 'FAILED', '']
+      );
     }
   });
 
