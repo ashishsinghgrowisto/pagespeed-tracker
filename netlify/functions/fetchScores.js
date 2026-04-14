@@ -8,7 +8,8 @@
  *  3. Appends a row per page × strategy to the project's Google Sheet
  */
 
-const { getProjects, getExistingScores, appendScoresToSheet } = require('./_utils/googleSheets');
+const { getProjects } = require('./_utils/storage');
+const { getExistingScores, appendScoresToSheet } = require('./_utils/googleSheets');
 const { fetchPageSpeed, sleep } = require('./_utils/psi');
 
 exports.handler = async (event) => {

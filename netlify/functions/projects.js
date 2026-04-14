@@ -1,5 +1,6 @@
 const { verifyToken } = require('./_utils/auth');
-const { getProjects, addProject, updateProject, corsHeaders } = require('./_utils/googleSheets');
+const { getProjects, addProject, updateProject } = require('./_utils/storage');
+const { corsHeaders } = require('./_utils/googleSheets');
 
 const CORS = {
   ...corsHeaders(),
@@ -7,19 +8,13 @@ const CORS = {
 };
 
 exports.handler = async (event) => {
-  // Preflight
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 204, headers: CORS, body: '' };
   }
 
-  // Auth check
   const user = verifyToken(event);
   if (!user) {
-    return {
-      statusCode: 401,
-      headers: CORS,
-      body: JSON.stringify({ error: 'Unauthorized' }),
-    };
+    return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
   try {
