@@ -68,13 +68,20 @@ export async function runScoresNow() {
 
 /**
  * Triggers a manual score run for a single project only.
+ * Uses the background function (15-min timeout) to handle projects with many pages.
  * Other projects' sheets are never touched.
  */
 export async function runProjectNow(projectId) {
-  const res = await fetch(`${BASE}/runScores?id=${encodeURIComponent(projectId)}`, {
+  const res = await fetch(`${BASE}/runScores-background?id=${encodeURIComponent(projectId)}`, {
     method: 'POST',
     headers: headers(),
   });
-  if (res.status === 202) return res.json().catch(() => ({ started: true }));
+  if (res.status === 202) {
+    const data = await res.json().catch(() => ({}));
+    return {
+      started: true,
+      message: data.message || 'Score run started — results will appear in your Google Sheet in a few minutes.',
+    };
+  }
   return handleResponse(res);
 }

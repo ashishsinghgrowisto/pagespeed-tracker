@@ -53,7 +53,7 @@ export default function ViewProjects() {
       const result = await runProjectNow(projectId);
       setProjectMessages(prev => ({
         ...prev,
-        [projectId]: { type: 'success', text: result.message || `Scores updated for "${projectName}".` },
+        [projectId]: { type: 'success', text: result.message || `Score run started for "${projectName}" — results will appear in your Google Sheet in a few minutes.` },
       }));
     } catch (err) {
       const msg = err.message || 'Run failed. Please try again.';
