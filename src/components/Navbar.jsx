@@ -2,9 +2,10 @@ import { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 
 const navLinks = [
-  { to: '/',            label: 'Dashboard'   },
-  { to: '/add-project', label: 'Add Project' },
-  { to: '/projects',    label: 'Projects'    },
+  { to: '/',                 label: 'Dashboard'   },
+  { to: '/add-project',      label: 'Add Project' },
+  { to: '/import-projects',  label: 'Import'      },
+  { to: '/projects',         label: 'Projects'    },
 ];
 
 export default function Navbar() {

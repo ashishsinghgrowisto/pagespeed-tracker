@@ -67,6 +67,19 @@ export async function runScoresNow() {
 }
 
 /**
+ * Bulk-imports projects from a parsed CSV/Excel file.
+ * @param {Array<{name, sheetUrl, pages: [{name, url}]}>} projects
+ */
+export async function importProjects(projects) {
+  const res = await fetch(`${BASE}/importProjects`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({ projects }),
+  });
+  return handleResponse(res);
+}
+
+/**
  * Triggers a manual score run for a single project only.
  * Uses the background function (15-min timeout) to handle projects with many pages.
  * Other projects' sheets are never touched.

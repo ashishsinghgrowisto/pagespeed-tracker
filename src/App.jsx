@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard';
 import AddProject from './pages/AddProject';
 import ViewProjects from './pages/ViewProjects';
 import EditProject from './pages/EditProject';
+import ImportProjects from './pages/ImportProjects';
 
 function PrivateRoute({ children }) {
   const token = localStorage.getItem('pst_token');
@@ -44,6 +45,14 @@ export default function App() {
           element={
             <PrivateRoute>
               <EditProject />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/import-projects"
+          element={
+            <PrivateRoute>
+              <ImportProjects />
             </PrivateRoute>
           }
         />
