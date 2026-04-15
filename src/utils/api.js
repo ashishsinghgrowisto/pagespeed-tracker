@@ -1,4 +1,4 @@
-const BASE = '/.netlify/functions';
+const BASE = '/api';
 
 function headers() {
   const token = localStorage.getItem('pst_token');
@@ -57,7 +57,7 @@ export async function updateProject(id, project) {
 }
 
 export async function runScoresNow() {
-  const res = await fetch(`${BASE}/runScores-background`, {
+  const res = await fetch(`${BASE}/runScores`, {
     method: 'POST',
     headers: headers(),
   });

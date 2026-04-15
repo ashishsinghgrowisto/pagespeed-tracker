@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/fetchScores",
+      "schedule": "30 18 * * *"
+    }
+  ],
+  "functions": {
+    "api/fetchScores.js": { "maxDuration": 60 },
+    "api/runScores.js":   { "maxDuration": 60 }
+  }
+}

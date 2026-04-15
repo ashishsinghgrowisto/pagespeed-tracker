@@ -2,13 +2,12 @@
   "name": "pagespeed-tracker",
   "version": "1.0.0",
   "scripts": {
-    "dev": "netlify dev",
+    "dev": "vercel dev",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@netlify/blobs": "^8.1.0",
-    "@netlify/functions": "^2.6.0",
+    "@vercel/kv": "^3.0.0",
     "googleapis": "^140.0.1",
     "jsonwebtoken": "^9.0.2",
     "react": "^18.2.0",
@@ -21,6 +20,6 @@
     "postcss": "^8.4.35",
     "tailwindcss": "^3.4.1",
     "vite": "^5.1.0",
-    "netlify-cli": "^17.0.0"
+    "vercel": "^39.0.0"
   }
 }
