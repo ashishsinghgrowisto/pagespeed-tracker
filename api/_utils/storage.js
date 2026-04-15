@@ -1,24 +1,34 @@
 /**
- * Project storage + run-lock using Vercel KV (Redis).
+ * Project storage + run-lock using Upstash Redis.
  *
  * Keys:
  *   "projects"  — JSON array of all project configs
  *   "run-lock"  — lock object while a cron/manual run is in progress
  *
- * @vercel/kv stores and retrieves JSON natively — no manual stringify/parse needed.
+ * Env vars (auto-set when you connect an Upstash Redis database in Vercel):
+ *   UPSTASH_REDIS_REST_URL
+ *   UPSTASH_REDIS_REST_TOKEN
  */
-const { kv } = require('@vercel/kv');
+const { Redis } = require('@upstash/redis');
+
+// Lock auto-expires after 20 min (safety valve for crashed runs)
+const LOCK_TTL_SECONDS = 20 * 60;
 
 const PROJECTS_KEY = 'projects';
 const LOCK_KEY     = 'run-lock';
 
-// Lock auto-expires after 20 min (safety valve for crashed runs)
-const LOCK_TTL_MS = 20 * 60 * 1000;
+function getRedis() {
+  return new Redis({
+    url:   process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN,
+  });
+}
 
 // ── Projects ──────────────────────────────────────────────────────────────────
 async function getProjects() {
   try {
-    const data = await kv.get(PROJECTS_KEY);
+    const redis = getRedis();
+    const data = await redis.get(PROJECTS_KEY);
     return Array.isArray(data) ? data : [];
   } catch {
     return [];
@@ -26,7 +36,8 @@ async function getProjects() {
 }
 
 async function saveProjects(projects) {
-  await kv.set(PROJECTS_KEY, projects);
+  const redis = getRedis();
+  await redis.set(PROJECTS_KEY, JSON.stringify(projects));
 }
 
 async function addProject(project) {
@@ -49,17 +60,17 @@ async function updateProject(id, project) {
 
 // ── Run Lock ──────────────────────────────────────────────────────────────────
 /**
- * Returns the current lock object, or null if not locked / lock is stale.
+ * Returns the current lock object, or null if not locked.
+ * Uses Redis TTL for automatic expiry — no manual stale-lock check needed.
  */
 async function getLock() {
   try {
-    const lock = await kv.get(LOCK_KEY);
+    const redis = getRedis();
+    const raw = await redis.get(LOCK_KEY);
+    if (!raw) return null;
+    // Upstash returns parsed JSON automatically if stored as JSON string
+    const lock = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!lock || !lock.type) return null;
-    // Auto-expire stale locks
-    if (Date.now() - new Date(lock.startedAt).getTime() > LOCK_TTL_MS) {
-      await kv.del(LOCK_KEY).catch(() => {});
-      return null;
-    }
     return lock;
   } catch {
     return null;
@@ -68,11 +79,17 @@ async function getLock() {
 
 /**
  * Acquires the lock. Returns true on success, false if already locked.
+ * Lock auto-expires after LOCK_TTL_SECONDS via Redis TTL.
  */
 async function acquireLock(type) {
   const existing = await getLock();
   if (existing) return false;
-  await kv.set(LOCK_KEY, { type, startedAt: new Date().toISOString() });
+  const redis = getRedis();
+  await redis.set(
+    LOCK_KEY,
+    JSON.stringify({ type, startedAt: new Date().toISOString() }),
+    { ex: LOCK_TTL_SECONDS }
+  );
   return true;
 }
 
@@ -81,7 +98,8 @@ async function acquireLock(type) {
  */
 async function releaseLock() {
   try {
-    await kv.del(LOCK_KEY);
+    const redis = getRedis();
+    await redis.del(LOCK_KEY);
   } catch (e) {
     console.error('[lock] Failed to release lock:', e.message);
   }
