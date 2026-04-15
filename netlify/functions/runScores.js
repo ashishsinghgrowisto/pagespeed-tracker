@@ -1,135 +1,127 @@
 /**
- * Manual score-fetch trigger — POST /.netlify/functions/runScores
- * Requires a valid JWT in the Authorization header.
- * Runs the same logic as the daily scheduled fetchScores function and
- * returns a JSON summary of every page processed.
+ * Manual trigger — POST /.netlify/functions/runScores
+ * (reached via redirect: POST /api/runScores)
+ *
+ * Modes:
+ *  - POST /api/runScores          → runs ALL projects (global lock)
+ *  - POST /api/runScores?id=<id>  → runs ONE project only (per-project lock)
+ *
+ * Guards:
+ *  - Requires valid JWT.
+ *  - Returns 409 if the target run is already in progress.
+ *  - Skips projects/pages already scored today (idempotent).
+ *  - Caps PSI concurrency at 10 to avoid Google rate limits.
+ *
+ * Note: Netlify timeout is 26s (configured in netlify.toml).
+ * For very large multi-project runs use runScores-background instead.
  */
 
 const { verifyToken } = require('./_utils/auth');
-const { getProjects } = require('./_utils/storage');
-const { getExistingScores, appendScoresToSheet } = require('./_utils/googleSheets');
-const { fetchPageSpeed, sleep } = require('./_utils/psi');
+const {
+  acquireLock,
+  releaseLock,
+  acquireProjectLock,
+  releaseProjectLock,
+} = require('./_utils/storage');
+const { runAllProjects, runProjectScores } = require('./_utils/runner');
+
+const CORS = {
+  'Content-Type': 'application/json',
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
 
 exports.handler = async (event) => {
-  // Only allow POST
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 204, headers: CORS, body: '' };
+  }
   if (event.httpMethod !== 'POST') {
-    return {
-      statusCode: 405,
-      body: JSON.stringify({ error: 'Method not allowed' }),
-    };
+    return { statusCode: 405, headers: CORS, body: JSON.stringify({ error: 'Method not allowed' }) };
   }
 
-  // Require valid JWT (verifyToken returns decoded payload on success, null on failure)
   const user = verifyToken(event);
   if (!user) {
-    return {
-      statusCode: 401,
-      body: JSON.stringify({ error: 'Unauthorized' }),
-    };
+    return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
-  console.log('[runScores] Manual trigger started');
+  const projectId = event.queryStringParameters && event.queryStringParameters.id;
 
-  let projects;
-  try {
-    projects = await getProjects();
-  } catch (err) {
-    console.error('[runScores] Failed to load projects:', err.message);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: 'Failed to load projects: ' + err.message }),
-    };
+  // ── Per-project run ─────────────────────────────────────────────────────────
+  if (projectId) {
+    const acquired = await acquireProjectLock(projectId);
+    if (!acquired) {
+      return {
+        statusCode: 409,
+        headers: CORS,
+        body: JSON.stringify({
+          error: 'A score run is already in progress for this project. Please wait for it to finish.',
+        }),
+      };
+    }
+
+    console.log(`[runScores] Per-project manual run started: ${projectId}`);
+
+    try {
+      const result = await runProjectScores(projectId, 'manual');
+      console.log('[runScores] Per-project done:', JSON.stringify(result));
+
+      if (!result.found) {
+        return { statusCode: 404, headers: CORS, body: JSON.stringify({ error: 'Project not found.' }) };
+      }
+
+      return {
+        statusCode: 202,
+        headers: CORS,
+        body: JSON.stringify({
+          started: true,
+          projectId,
+          projectName: result.projectName,
+          skipped: result.skipped,
+          message: result.skipped
+            ? `"${result.projectName}" already has scores for today (${result.dateStr}). Nothing to update.`
+            : `Score run complete for "${result.projectName}". Results are in your Google Sheet.`,
+        }),
+      };
+    } finally {
+      await releaseProjectLock(projectId);
+      console.log(`[runScores] Project lock released: ${projectId}`);
+    }
   }
 
-  if (!projects.length) {
+  // ── All-projects run ────────────────────────────────────────────────────────
+  const acquired = await acquireLock('manual');
+  if (!acquired) {
     return {
-      statusCode: 200,
+      statusCode: 409,
+      headers: CORS,
       body: JSON.stringify({
-        message: 'No projects found — nothing to do.',
-        summary: [],
+        error: 'A score run is already in progress (cron or another manual trigger). Please wait for it to finish.',
       }),
     };
   }
 
-  const today = new Date();
-  const dateStr = today
-    .toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
-    .replace(/ /g, '-'); // e.g. "14-Apr-2026"
+  console.log('[runScores] Manual run started (all projects)');
 
-  const summary = []; // Returned to the client
+  try {
+    const result = await runAllProjects('manual');
+    console.log('[runScores] Done:', JSON.stringify(result));
 
-  for (const project of projects) {
-    console.log(`[runScores] Processing project: ${project.name}`);
-    const projectResult = {
-      project: project.name,
-      pages: [],
-      error: null,
+    const allSkipped = result.skipped === result.projects;
+
+    return {
+      statusCode: 202,
+      headers: CORS,
+      body: JSON.stringify({
+        started: true,
+        projects: result.projects,
+        skipped: result.skipped,
+        message: allSkipped
+          ? `All ${result.projects} project(s) already have scores for today (${result.dateStr}). Nothing to update.`
+          : `Score run complete for ${result.projects - result.skipped} project(s). Results are in your Google Sheets.`,
+      }),
     };
-
-    try {
-      const existing = await getExistingScores(project.sheetUrl);
-      const rows = [];
-
-      for (const page of project.pages) {
-        for (const strategy of ['mobile', 'desktop']) {
-          const paramName = strategy === 'mobile' ? 'Mobile Score' : 'Desktop Score';
-
-          try {
-            const score = await fetchPageSpeed(page.url, strategy);
-
-            // Find the most recent previous score for this page + strategy
-            let prevScore = null;
-            for (let i = existing.length - 1; i >= 1; i--) {
-              const r = existing[i];
-              if (r[1] === page.name && r[3] === paramName && r[4] !== undefined) {
-                const parsed = parseFloat(r[4]);
-                if (!isNaN(parsed)) { prevScore = parsed; break; }
-              }
-            }
-
-            const difference = prevScore !== null ? score - prevScore : 0;
-            rows.push([dateStr, page.name, page.url, paramName, score, difference]);
-
-            projectResult.pages.push({
-              page: page.name,
-              strategy: paramName,
-              score,
-              difference,
-            });
-
-            console.log(`  ${page.name} ${paramName}: ${score} (${difference >= 0 ? '+' : ''}${difference})`);
-            await sleep(1200);
-          } catch (pageErr) {
-            console.error(`  Error for ${page.name} (${strategy}):`, pageErr.message);
-            projectResult.pages.push({
-              page: page.name,
-              strategy: paramName,
-              score: null,
-              error: pageErr.message,
-            });
-          }
-        }
-      }
-
-      if (rows.length) {
-        await appendScoresToSheet(project.sheetUrl, rows);
-        console.log(`[runScores] Saved ${rows.length} rows for "${project.name}"`);
-      }
-    } catch (projErr) {
-      console.error(`[runScores] Error on project "${project.name}":`, projErr.message);
-      projectResult.error = projErr.message;
-    }
-
-    summary.push(projectResult);
+  } finally {
+    await releaseLock();
+    console.log('[runScores] Lock released.');
   }
-
-  console.log('[runScores] Manual run complete.');
-  return {
-    statusCode: 200,
-    body: JSON.stringify({
-      message: `Scores fetched for ${projects.length} project(s) on ${dateStr}.`,
-      date: dateStr,
-      summary,
-    }),
-  };
 };

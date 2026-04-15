@@ -1,47 +1,47 @@
 /**
- * Project storage + run-lock using Netlify Blobs.
+ * Project storage + run-lock using Redis (redis npm package, v4+).
  *
- * Keys in the "pagespeed-tracker" store:
+ * Keys:
  *   "projects"  — JSON array of all project configs
- *   "run-lock"  — JSON lock object while a cron/manual run is in progress
+ *   "run-lock"  — lock object while a cron/manual run is in progress
  *
- * NOTE: We avoid store.delete() because it can silently fail when using a PAT
- * token. Instead we store null / the lock object with store.set().
+ * Env vars (auto-set when you connect a Redis database in Vercel):
+ *   REDIS_URL   — e.g. redis://default:password@host:port
  */
-const { getStore } = require('@netlify/blobs');
+const { createClient } = require('redis');
 
-const STORE_NAME   = 'pagespeed-tracker';
+// Lock auto-expires after 20 min (safety valve for crashed runs)
+const LOCK_TTL_SECONDS = 20 * 60;
+
 const PROJECTS_KEY = 'projects';
 const LOCK_KEY     = 'run-lock';
 
-// Lock expires after 20 min (safety valve so a crashed run never blocks forever)
-const LOCK_TTL_MS = 20 * 60 * 1000;
+let _client = null;
 
-function getProjectStore() {
-  const siteID = process.env.NETLIFY_SITE_ID;
-  const token  = process.env.NETLIFY_BLOBS_TOKEN;
-  if (siteID && token) {
-    return getStore({ name: STORE_NAME, siteID, token });
-  }
-  return getStore(STORE_NAME);
+async function getRedis() {
+  if (_client && _client.isOpen) return _client;
+  _client = createClient({ url: process.env.REDIS_URL });
+  _client.on('error', (err) => console.error('[redis] Client error:', err));
+  await _client.connect();
+  return _client;
 }
 
 // ── Projects ──────────────────────────────────────────────────────────────────
 async function getProjects() {
-  const store = getProjectStore();
   try {
-    const raw = await store.get(PROJECTS_KEY);
-    if (!raw) return [];
-    const data = JSON.parse(raw);
-    return Array.isArray(data) ? data : [];
+    const redis = await getRedis();
+    const data = await redis.get(PROJECTS_KEY);
+    if (!data) return [];
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
 async function saveProjects(projects) {
-  const store = getProjectStore();
-  await store.set(PROJECTS_KEY, JSON.stringify(projects));
+  const redis = await getRedis();
+  await redis.set(PROJECTS_KEY, JSON.stringify(projects));
 }
 
 async function addProject(project) {
@@ -64,21 +64,16 @@ async function updateProject(id, project) {
 
 // ── Run Lock ──────────────────────────────────────────────────────────────────
 /**
- * Returns the current lock object, or null if not locked / lock is stale.
+ * Returns the current lock object, or null if not locked.
+ * Uses Redis TTL for automatic expiry — no manual stale-lock check needed.
  */
 async function getLock() {
-  const store = getProjectStore();
   try {
-    const raw = await store.get(LOCK_KEY);
-    if (!raw || raw === 'null') return null;
+    const redis = await getRedis();
+    const raw = await redis.get(LOCK_KEY);
+    if (!raw) return null;
     const lock = JSON.parse(raw);
     if (!lock || !lock.type) return null;
-    // Auto-expire stale locks
-    if (Date.now() - new Date(lock.startedAt).getTime() > LOCK_TTL_MS) {
-      // Release stale lock
-      await store.set(LOCK_KEY, 'null').catch(() => {});
-      return null;
-    }
     return lock;
   } catch {
     return null;
@@ -87,27 +82,69 @@ async function getLock() {
 
 /**
  * Acquires the lock. Returns true on success, false if already locked.
+ * Lock auto-expires after LOCK_TTL_SECONDS via Redis TTL.
  */
 async function acquireLock(type) {
   const existing = await getLock();
   if (existing) return false;
-  const store = getProjectStore();
-  await store.set(LOCK_KEY, JSON.stringify({
-    type,
-    startedAt: new Date().toISOString(),
-  }));
+  const redis = await getRedis();
+  await redis.set(
+    LOCK_KEY,
+    JSON.stringify({ type, startedAt: new Date().toISOString() }),
+    { EX: LOCK_TTL_SECONDS }
+  );
   return true;
 }
 
 /**
- * Releases the lock by setting it to null (avoids store.delete() reliability issues).
+ * Releases the lock.
  */
 async function releaseLock() {
-  const store = getProjectStore();
   try {
-    await store.set(LOCK_KEY, 'null');
+    const redis = await getRedis();
+    await redis.del(LOCK_KEY);
   } catch (e) {
     console.error('[lock] Failed to release lock:', e.message);
+  }
+}
+
+// ── Per-Project Locks ─────────────────────────────────────────────────────────
+// Uses separate Redis keys so individual project runs don't block each other.
+
+function projectLockKey(projectId) {
+  return `run-lock:${projectId}`;
+}
+
+async function getProjectLock(projectId) {
+  try {
+    const redis = await getRedis();
+    const raw = await redis.get(projectLockKey(projectId));
+    if (!raw) return null;
+    const lock = JSON.parse(raw);
+    return lock && lock.type ? lock : null;
+  } catch {
+    return null;
+  }
+}
+
+async function acquireProjectLock(projectId) {
+  const existing = await getProjectLock(projectId);
+  if (existing) return false;
+  const redis = await getRedis();
+  await redis.set(
+    projectLockKey(projectId),
+    JSON.stringify({ type: 'manual', startedAt: new Date().toISOString() }),
+    { EX: LOCK_TTL_SECONDS }
+  );
+  return true;
+}
+
+async function releaseProjectLock(projectId) {
+  try {
+    const redis = await getRedis();
+    await redis.del(projectLockKey(projectId));
+  } catch (e) {
+    console.error(`[lock] Failed to release project lock for ${projectId}:`, e.message);
   }
 }
 
@@ -118,4 +155,7 @@ module.exports = {
   getLock,
   acquireLock,
   releaseLock,
+  getProjectLock,
+  acquireProjectLock,
+  releaseProjectLock,
 };
