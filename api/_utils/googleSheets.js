@@ -28,7 +28,7 @@ async function appendScoresToSheet(sheetUrl, rows) {
   await sheets.spreadsheets.values.append({
     spreadsheetId,
     range: 'Sheet1!A:F',
-    valueInputOption: 'USER_ENTERED',
+    valueInputOption: 'RAW',
     requestBody: { values: rows },
   });
 }

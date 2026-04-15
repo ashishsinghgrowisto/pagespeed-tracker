@@ -40,9 +40,12 @@ async function pLimit(taskFactories, limit) {
 }
 
 function todayDateStr() {
-  return new Date()
-    .toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
-    .replace(/ /g, '-'); // e.g. "14-Apr-2026"
+  const d = new Date();
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  const month = months[d.getUTCMonth()];
+  const year = d.getUTCFullYear();
+  return `${day}-${month}-${year}`; // e.g. "15-Apr-2026"
 }
 
 /**
@@ -182,18 +185,12 @@ async function runProjectScores(projectId, context = 'manual') {
 
   console.log(`${tag} Running scores for "${project.name}" | date: ${dateStr}`);
 
-  // Check if already scored today
+  // Read existing scores only for the diff calculation (no skip — manual runs always append)
   let existing = [];
   try {
     existing = await getExistingScores(project.sheetUrl);
   } catch (e) {
     console.warn(`${tag} Could not read existing scores: ${e.message}`);
-  }
-
-  const alreadyDone = existing.slice(1).some(r => r[0] === dateStr);
-  if (alreadyDone) {
-    console.log(`${tag} ↩ Already has data for ${dateStr} — skipping`);
-    return { found: true, skipped: true, projectName: project.name, dateStr };
   }
 
   // Build task list for this project only
