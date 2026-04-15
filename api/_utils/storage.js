@@ -1,15 +1,14 @@
 /**
- * Project storage + run-lock using Upstash Redis.
+ * Project storage + run-lock using Redis (redis npm package, v4+).
  *
  * Keys:
  *   "projects"  — JSON array of all project configs
  *   "run-lock"  — lock object while a cron/manual run is in progress
  *
- * Env vars (auto-set when you connect an Upstash Redis database in Vercel):
- *   UPSTASH_REDIS_REST_URL
- *   UPSTASH_REDIS_REST_TOKEN
+ * Env vars (auto-set when you connect a Redis database in Vercel):
+ *   REDIS_URL   — e.g. redis://default:password@host:port
  */
-const { Redis } = require('@upstash/redis');
+const { createClient } = require('redis');
 
 // Lock auto-expires after 20 min (safety valve for crashed runs)
 const LOCK_TTL_SECONDS = 20 * 60;
@@ -17,26 +16,31 @@ const LOCK_TTL_SECONDS = 20 * 60;
 const PROJECTS_KEY = 'projects';
 const LOCK_KEY     = 'run-lock';
 
-function getRedis() {
-  return new Redis({
-    url:   process.env.UPSTASH_REDIS_REST_URL,
-    token: process.env.UPSTASH_REDIS_REST_TOKEN,
-  });
+let _client = null;
+
+async function getRedis() {
+  if (_client && _client.isOpen) return _client;
+  _client = createClient({ url: process.env.REDIS_URL });
+  _client.on('error', (err) => console.error('[redis] Client error:', err));
+  await _client.connect();
+  return _client;
 }
 
 // ── Projects ──────────────────────────────────────────────────────────────────
 async function getProjects() {
   try {
-    const redis = getRedis();
+    const redis = await getRedis();
     const data = await redis.get(PROJECTS_KEY);
-    return Array.isArray(data) ? data : [];
+    if (!data) return [];
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
 async function saveProjects(projects) {
-  const redis = getRedis();
+  const redis = await getRedis();
   await redis.set(PROJECTS_KEY, JSON.stringify(projects));
 }
 
@@ -65,11 +69,10 @@ async function updateProject(id, project) {
  */
 async function getLock() {
   try {
-    const redis = getRedis();
+    const redis = await getRedis();
     const raw = await redis.get(LOCK_KEY);
     if (!raw) return null;
-    // Upstash returns parsed JSON automatically if stored as JSON string
-    const lock = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const lock = JSON.parse(raw);
     if (!lock || !lock.type) return null;
     return lock;
   } catch {
@@ -84,11 +87,11 @@ async function getLock() {
 async function acquireLock(type) {
   const existing = await getLock();
   if (existing) return false;
-  const redis = getRedis();
+  const redis = await getRedis();
   await redis.set(
     LOCK_KEY,
     JSON.stringify({ type, startedAt: new Date().toISOString() }),
-    { ex: LOCK_TTL_SECONDS }
+    { EX: LOCK_TTL_SECONDS }
   );
   return true;
 }
@@ -98,7 +101,7 @@ async function acquireLock(type) {
  */
 async function releaseLock() {
   try {
-    const redis = getRedis();
+    const redis = await getRedis();
     await redis.del(LOCK_KEY);
   } catch (e) {
     console.error('[lock] Failed to release lock:', e.message);
