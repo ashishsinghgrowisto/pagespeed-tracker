@@ -108,6 +108,46 @@ async function releaseLock() {
   }
 }
 
+// ── Per-Project Locks ─────────────────────────────────────────────────────────
+// Uses separate Redis keys so individual project runs don't block each other.
+
+function projectLockKey(projectId) {
+  return `run-lock:${projectId}`;
+}
+
+async function getProjectLock(projectId) {
+  try {
+    const redis = await getRedis();
+    const raw = await redis.get(projectLockKey(projectId));
+    if (!raw) return null;
+    const lock = JSON.parse(raw);
+    return lock && lock.type ? lock : null;
+  } catch {
+    return null;
+  }
+}
+
+async function acquireProjectLock(projectId) {
+  const existing = await getProjectLock(projectId);
+  if (existing) return false;
+  const redis = await getRedis();
+  await redis.set(
+    projectLockKey(projectId),
+    JSON.stringify({ type: 'manual', startedAt: new Date().toISOString() }),
+    { EX: LOCK_TTL_SECONDS }
+  );
+  return true;
+}
+
+async function releaseProjectLock(projectId) {
+  try {
+    const redis = await getRedis();
+    await redis.del(projectLockKey(projectId));
+  } catch (e) {
+    console.error(`[lock] Failed to release project lock for ${projectId}:`, e.message);
+  }
+}
+
 module.exports = {
   getProjects,
   addProject,
@@ -115,4 +155,7 @@ module.exports = {
   getLock,
   acquireLock,
   releaseLock,
+  getProjectLock,
+  acquireProjectLock,
+  releaseProjectLock,
 };

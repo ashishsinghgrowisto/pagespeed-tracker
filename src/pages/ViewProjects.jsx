@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import Navbar from '../components/Navbar';
-import { getProjects } from '../utils/api';
+import { getProjects, runProjectNow } from '../utils/api';
 
 function ScoreBadge({ count }) {
   return (
@@ -17,6 +17,11 @@ export default function ViewProjects() {
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
 
+  // Track which projects are currently running (Set of project IDs)
+  const [runningProjects, setRunningProjects] = useState(new Set());
+  // Per-project result messages: { [projectId]: { type: 'success'|'error', text: string } }
+  const [projectMessages, setProjectMessages] = useState({});
+
   useEffect(() => {
     loadProjects();
   }, []);
@@ -31,6 +36,37 @@ export default function ViewProjects() {
       setError(err.message || 'Failed to load projects');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleProjectRun(projectId, projectName) {
+    // Mark this project as running
+    setRunningProjects(prev => new Set([...prev, projectId]));
+    // Clear any previous message
+    setProjectMessages(prev => {
+      const next = { ...prev };
+      delete next[projectId];
+      return next;
+    });
+
+    try {
+      const result = await runProjectNow(projectId);
+      setProjectMessages(prev => ({
+        ...prev,
+        [projectId]: { type: 'success', text: result.message || `Scores updated for "${projectName}".` },
+      }));
+    } catch (err) {
+      const msg = err.message || 'Run failed. Please try again.';
+      setProjectMessages(prev => ({
+        ...prev,
+        [projectId]: { type: 'error', text: msg },
+      }));
+    } finally {
+      setRunningProjects(prev => {
+        const next = new Set(prev);
+        next.delete(projectId);
+        return next;
+      });
     }
   }
 
@@ -124,60 +160,104 @@ export default function ViewProjects() {
         {/* Project grid */}
         {!loading && filtered.length > 0 && (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-            {filtered.map(project => (
-              <div
-                key={project.id}
-                className="bg-white rounded-2xl border border-gray-200 shadow-sm hover:shadow-md hover:border-indigo-200 transition-all overflow-hidden"
-              >
-                <div className="h-1.5 bg-gradient-to-r from-indigo-500 to-purple-500" />
-                <div className="p-6">
-                  <div className="flex items-start justify-between gap-3 mb-3">
-                    <h3 className="font-bold text-gray-900 text-lg leading-tight">{project.name}</h3>
-                    <ScoreBadge count={project.pages?.length || 0} />
-                  </div>
+            {filtered.map(project => {
+              const isRunning = runningProjects.has(project.id);
+              const msg = projectMessages[project.id];
 
-                  {/* Pages preview */}
-                  <div className="space-y-1 mb-4">
-                    {(project.pages || []).slice(0, 4).map((page, i) => (
-                      <div key={i} className="flex items-center gap-2 text-sm text-gray-600">
-                        <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 flex-shrink-0" />
-                        <span className="font-medium text-gray-700 truncate">{page.name}</span>
-                        <span className="text-gray-400 truncate text-xs">{page.url}</span>
+              return (
+                <div
+                  key={project.id}
+                  className="bg-white rounded-2xl border border-gray-200 shadow-sm hover:shadow-md hover:border-indigo-200 transition-all overflow-hidden"
+                >
+                  <div className="h-1.5 bg-gradient-to-r from-indigo-500 to-purple-500" />
+                  <div className="p-6">
+                    <div className="flex items-start justify-between gap-3 mb-3">
+                      <h3 className="font-bold text-gray-900 text-lg leading-tight">{project.name}</h3>
+                      <ScoreBadge count={project.pages?.length || 0} />
+                    </div>
+
+                    {/* Pages preview */}
+                    <div className="space-y-1 mb-4">
+                      {(project.pages || []).slice(0, 4).map((page, i) => (
+                        <div key={i} className="flex items-center gap-2 text-sm text-gray-600">
+                          <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 flex-shrink-0" />
+                          <span className="font-medium text-gray-700 truncate">{page.name}</span>
+                          <span className="text-gray-400 truncate text-xs">{page.url}</span>
+                        </div>
+                      ))}
+                      {(project.pages || []).length > 4 && (
+                        <p className="text-xs text-gray-400 pl-3.5">
+                          +{project.pages.length - 4} more pages
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Sheet link */}
+                    <a
+                      href={project.sheetUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-1.5 text-xs text-emerald-600 hover:text-emerald-800 mb-4 truncate"
+                      onClick={e => e.stopPropagation()}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                      </svg>
+                      View Google Sheet
+                    </a>
+
+                    {/* Per-project result message */}
+                    {msg && (
+                      <div className={`mb-3 px-3 py-2 rounded-lg text-xs font-medium ${
+                        msg.type === 'success'
+                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                          : 'bg-red-50 text-red-700 border border-red-200'
+                      }`}>
+                        {msg.text}
                       </div>
-                    ))}
-                    {(project.pages || []).length > 4 && (
-                      <p className="text-xs text-gray-400 pl-3.5">
-                        +{project.pages.length - 4} more pages
-                      </p>
                     )}
+
+                    {/* Action buttons — 50/50 split */}
+                    <div className="flex gap-2">
+                      {/* Run Scores button */}
+                      <button
+                        onClick={() => handleProjectRun(project.id, project.name)}
+                        disabled={isRunning}
+                        className="w-1/2 flex items-center justify-center gap-1.5 py-2 px-3 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {isRunning ? (
+                          <>
+                            <svg className="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                            </svg>
+                            Running…
+                          </>
+                        ) : (
+                          <>
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+                            </svg>
+                            Run Scores
+                          </>
+                        )}
+                      </button>
+
+                      {/* Edit Project button */}
+                      <Link
+                        to={`/projects/${project.id}/edit`}
+                        className="w-1/2 flex items-center justify-center gap-1.5 py-2 px-3 border border-indigo-200 text-indigo-600 text-sm font-medium rounded-lg hover:bg-indigo-50 transition-colors"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                          <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+                        </svg>
+                        Edit Project
+                      </Link>
+                    </div>
                   </div>
-
-                  {/* Sheet link */}
-                  <a
-                    href={project.sheetUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-1.5 text-xs text-emerald-600 hover:text-emerald-800 mb-5 truncate"
-                    onClick={e => e.stopPropagation()}
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                    </svg>
-                    View Google Sheet
-                  </a>
-
-                  <Link
-                    to={`/projects/${project.id}/edit`}
-                    className="w-full flex items-center justify-center gap-2 py-2 px-4 border border-indigo-200 text-indigo-600 text-sm font-medium rounded-lg hover:bg-indigo-50 transition-colors"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                      <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-                    </svg>
-                    Edit Project
-                  </Link>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </main>

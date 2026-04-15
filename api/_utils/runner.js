@@ -161,4 +161,100 @@ async function runAllProjects(context = 'manual') {
   return { projects: projects.length, skipped, tasks: allTasks.length, elapsed, dateStr };
 }
 
-module.exports = { runAllProjects };
+/**
+ * Runs scores for a single project only.
+ * Uses the same PSI fetching and sheet-writing logic as runAllProjects
+ * but scoped to one project — so other projects' sheets are never touched.
+ *
+ * @param {string} projectId  - ID of the project to run
+ * @param {string} context    - 'manual' (always, for per-project runs)
+ */
+async function runProjectScores(projectId, context = 'manual') {
+  const dateStr = todayDateStr();
+  const tag = `[runner:${context}:${projectId}]`;
+
+  const projects = await getProjects();
+  const project = projects.find(p => p.id === projectId);
+  if (!project) {
+    console.log(`${tag} Project not found.`);
+    return { found: false, projectId, dateStr };
+  }
+
+  console.log(`${tag} Running scores for "${project.name}" | date: ${dateStr}`);
+
+  // Check if already scored today
+  let existing = [];
+  try {
+    existing = await getExistingScores(project.sheetUrl);
+  } catch (e) {
+    console.warn(`${tag} Could not read existing scores: ${e.message}`);
+  }
+
+  const alreadyDone = existing.slice(1).some(r => r[0] === dateStr);
+  if (alreadyDone) {
+    console.log(`${tag} ↩ Already has data for ${dateStr} — skipping`);
+    return { found: true, skipped: true, projectName: project.name, dateStr };
+  }
+
+  // Build task list for this project only
+  const allTasks = [];
+  for (const page of project.pages) {
+    for (const strategy of ['mobile', 'desktop']) {
+      allTasks.push({ project, existing, page, strategy });
+    }
+  }
+
+  if (!allTasks.length) {
+    return { found: true, skipped: true, projectName: project.name, dateStr };
+  }
+
+  console.log(`${tag} ${allTasks.length} PSI calls queued (max ${MAX_CONCURRENT} concurrent)`);
+  const t0 = Date.now();
+
+  const taskFactories = allTasks.map(({ page, strategy }) => async () => {
+    const paramName = strategy === 'mobile' ? 'Mobile Score' : 'Desktop Score';
+    const score = await fetchPageSpeed(page.url, strategy);
+
+    let prevScore = null;
+    for (let j = existing.length - 1; j >= 1; j--) {
+      const r = existing[j];
+      if (r[1] === page.name && r[3] === paramName && r[4] !== undefined) {
+        const p = parseFloat(r[4]);
+        if (!isNaN(p)) { prevScore = p; break; }
+      }
+    }
+
+    const diff = prevScore !== null ? score - prevScore : 0;
+    console.log(`${tag} ✓ ${page.name} | ${paramName}: ${score} (${diff >= 0 ? '+' : ''}${diff})`);
+    return { page, paramName, row: [dateStr, page.name, page.url, paramName, score, diff] };
+  });
+
+  const results = await pLimit(taskFactories, MAX_CONCURRENT);
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  console.log(`${tag} All PSI calls done in ${elapsed}s`);
+
+  // Write rows to this project's sheet only
+  const rows = [];
+  results.forEach((result, i) => {
+    const { page, strategy } = allTasks[i];
+    const paramName = strategy === 'mobile' ? 'Mobile Score' : 'Desktop Score';
+    if (result.status === 'fulfilled') {
+      rows.push(result.value.row);
+    } else {
+      console.error(`${tag} ✗ ${page.name} | ${paramName}: FAILED — ${result.reason?.message}`);
+      rows.push([dateStr, page.name, page.url, paramName, 'FAILED', '']);
+    }
+  });
+
+  try {
+    await appendScoresToSheet(project.sheetUrl, rows);
+    console.log(`${tag} ✓ Wrote ${rows.length} rows for "${project.name}"`);
+  } catch (e) {
+    console.error(`${tag} Failed to write sheet: ${e.message}`);
+    throw e;
+  }
+
+  return { found: true, skipped: false, projectName: project.name, tasks: allTasks.length, elapsed, dateStr };
+}
+
+module.exports = { runAllProjects, runProjectScores };

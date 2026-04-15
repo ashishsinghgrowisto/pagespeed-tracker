@@ -65,3 +65,16 @@ export async function runScoresNow() {
   if (res.status === 202) return res.json().catch(() => ({ started: true }));
   return handleResponse(res); // throws for 401, 409, etc.
 }
+
+/**
+ * Triggers a manual score run for a single project only.
+ * Other projects' sheets are never touched.
+ */
+export async function runProjectNow(projectId) {
+  const res = await fetch(`${BASE}/runScores?id=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    headers: headers(),
+  });
+  if (res.status === 202) return res.json().catch(() => ({ started: true }));
+  return handleResponse(res);
+}
